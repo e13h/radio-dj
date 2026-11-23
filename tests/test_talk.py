@@ -73,3 +73,21 @@ def test_pronouncer():
     # Voices without phoneme support get the spelling, or the word unchanged.
     assert pr.apply(text, "text") == "That was Shah-day. Shah-day's best, then Sigh-ur Rose and Hozier. Crusade!"
     assert Pronouncer({}).apply(text, "kokoro") == text
+
+
+def test_eta_counts_everything_ahead_of_the_break():
+    """A break written while one song plays and two more are lined up airs after all of them."""
+    import time
+    from zoneinfo import ZoneInfo
+
+    from station import Item
+
+    def song(duration: float) -> Item:
+        return Item(kind="song", path=Path("x"), title="t", artist="a", duration=duration)
+
+    playing, fetched, prev = song(240), song(200), song(210)
+    playing.started_at = time.time() - 60  # 180s left
+    fake = SimpleNamespace(tz=ZoneInfo("UTC"), now_playing=playing, upcoming=[fetched, prev])
+    eta = Station._eta(fake, {"duration": 210}).timestamp() - time.time()
+    assert abs(eta - (180 + 200 + 210)) < 2
+

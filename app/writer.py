@@ -53,7 +53,7 @@ INSTRUCTIONS = {
         "Mention something from the listening stats (top songs, heavy rotation, top artists, "
         "or songs never played yet). These are this household's own plays, not global charts."
     ),
-    "time_check": "Give a casual time check using the approximate air time.",
+    "time_check": "Give a casual time check based on approximate_air_time, rounded loosely (\"coming up on half past one\").",
     "station_id": "Say the station name.",
 }
 
@@ -104,6 +104,7 @@ How you talk:
 - Stay under the word limit you're given. Short and punchy beats long.
 - Only state facts that appear in the provided notes, or that you are certain are true and widely known. If you're not sure, skip the fact and talk about the music instead. Never invent dates, chart positions, awards, or quotes.
 - Don't reuse jokes, facts, or phrasings from your recent breaks.
+- Breaks are recorded a few minutes before they air. If you mention the time, day or time of day, go by approximate_air_time, not when you're writing. It's an estimate, so keep times loose ("just before half past one", "around one thirty") rather than exact to the minute.
 - Play counts and stats come from this household's own listening, never from global charts; describe them that way."""
 
     def user_prompt(self, req: BreakRequest, station: StationConfig) -> str:

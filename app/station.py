@@ -113,10 +113,12 @@ class Station:
         self.bios: dict[str, str] = {}
 
         self.ready: asyncio.Queue[Item] = asyncio.Queue(maxsize=1)
-        self.handed_out: dict[str, Item] = {}
+        # Items queued or handed to Liquidsoap but not yet on air, in play order.
+        self.upcoming: list[Item] = []
         self.queued_song_ids: set[str] = set()
         self.now_playing: Item | None = None
         self.on_air_dj: str | None = None
+        self.last_eta: dt.datetime | None = None  # when the last break written was expected to air
         self.tracks_since_talk = 0
 
         self.dive_tracks: list[dict] = []
@@ -170,13 +172,15 @@ class Station:
             item = await asyncio.wait_for(self.ready.get(), timeout)
         except TimeoutError:
             return None
-        self.handed_out[item.id] = item
         return item
 
     async def aired(self, item_id: str) -> None:
-        item = self.handed_out.pop(item_id, None)
-        if item is None:
+        idx = next((i for i, it in enumerate(self.upcoming) if it.id == item_id), None)
+        if idx is None:
             return
+        item = self.upcoming[idx]
+        # Liquidsoap plays in order: anything before this one was dropped (e.g. a restart).
+        del self.upcoming[: idx + 1]
         item.started_at = time.time()
         self.now_playing = item
         if item.kind == "voice":
@@ -233,8 +237,10 @@ class Station:
                 if self._should_talk(prev, phase, first):
                     voice = await self._prepare_break(prev, song, "sign_on" if first else phase)
                     if voice:
+                        self.upcoming.append(voice)
                         await self.ready.put(voice)
                         self.tracks_since_talk = 0
+                self.upcoming.append(song_item)
                 await self.ready.put(song_item)
                 self.tracks_since_talk += 1
                 prev, first = song, False
@@ -303,11 +309,16 @@ class Station:
         return n > 0 and self.tracks_since_talk >= n
 
     def _eta(self, prev: dict | None) -> dt.datetime:
-        # The break airs after `prev`, which has usually just been queued.
-        seconds = (prev or {}).get("duration") or 0
-        if self.preview_seconds:
-            seconds = min(seconds, self.preview_seconds)
-        return dt.datetime.now(self.tz) + dt.timedelta(seconds=seconds)
+        """When the next break would air: after what's playing and everything lined up behind it.
+
+        `prev` is already in `upcoming`; the parameter is kept so dry runs can fake the clock.
+        """
+        now = time.time()
+        seconds = sum(it.duration for it in self.upcoming)
+        np = self.now_playing
+        if np and np.started_at:
+            seconds += max(0.0, np.started_at + np.duration - now)
+        return dt.datetime.fromtimestamp(now + seconds, self.tz)
 
     async def _prepare_song(self, song: dict) -> Item:
         duration = float(song.get("duration") or 0)
@@ -458,7 +469,7 @@ class Station:
 
     async def write_break(self, prev: dict | None, nxt: dict, phase: str) -> tuple[str, BreakRequest, str]:
         """Decide who talks, what about and for how long, and write it: (dj_id, request, text)."""
-        eta = self._eta(prev)
+        eta = self.last_eta = self._eta(prev)
         dj_id = self.st.dj_at(eta)
         handoff = self.cfg.djs[self.on_air_dj].name if self.on_air_dj and self.on_air_dj != dj_id else None
         length, words, max_extras = self.pick_length()
@@ -476,7 +487,8 @@ class Station:
             log.error("[%s] TTS failed %d times (%s); skipping this break", self.sid, TTS_ATTEMPTS, e)
             return None
         self.on_air_dj = dj_id
-        log.info("[%s] prepared break (airs in a song or two) %s: %s", self.sid, dj.name, text)
+        eta = self.last_eta.strftime("%-I:%M:%S %p") if self.last_eta else "?"
+        log.info("[%s] prepared break (expected on air ~%s) %s: %s", self.sid, eta, dj.name, text)
         return Item(
             kind="voice",
             path=path,
