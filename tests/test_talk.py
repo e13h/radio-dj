@@ -91,3 +91,20 @@ def test_eta_counts_everything_ahead_of_the_break():
     eta = Station._eta(fake, {"duration": 210}).timestamp() - time.time()
     assert abs(eta - (180 + 200 + 210)) < 2
 
+
+
+def test_drafting_notes_are_caught():
+    from writer import META_TEXT
+
+    leaked = [
+        "That was Tuesdays by Jake Scott. Count: that's about 30 words, over the limit. Trimming: That was Jake Scott.",
+        "Here comes Let It Go! Wait, that's 17 words. Trimmed: Next, Let It Go!",
+        "Revised: That was People by Jon McLaughlin.",
+    ]
+    clean = [
+        "That was Tuesdays by Jake Scott. Here's Allen Stone with Miscommunicate.",
+        "It's coming up on half past one, and this one counts down to the weekend.",
+        "Fifteen years after their first record, here's the final track from the album.",
+    ]
+    assert all(META_TEXT.search(t) for t in leaked)
+    assert not any(META_TEXT.search(t) for t in clean)

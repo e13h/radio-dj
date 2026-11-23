@@ -18,6 +18,12 @@ log = logging.getLogger(__name__)
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # After the API rejects the key, wait this long before trying Claude again.
 AUTH_RETRY_SECONDS = 3600
+# Drafting left in the reply ("Count: that's 30 words. Trimming: ..."), which TTS would read out.
+META_TEXT = re.compile(
+    r"\b(?:\d+\s+words|word\s+(?:count|limit)|(?:over|under)\s+the\s+limit"
+    r"|(?:count|trimm(?:ed|ing)|revised|revision|draft|shorter|final(?:\s+version)?)\s*:)",
+    re.I,
+)
 
 
 @dataclass
@@ -100,6 +106,7 @@ Your persona:
 
 How you talk:
 - Write exactly the words you will say on air. They go straight to text-to-speech, so no stage directions, sound effects, emoji, markdown, or lists.
+- Reply with only the final script, once. Don't count words, show a draft, or revise in your reply: everything you write is read out.
 - Write things the way they are spoken: "featuring" rather than "ft.", and spell out symbols.
 - Stay under the word limit you're given. Short and punchy beats long.
 - Only state facts that appear in the provided notes, or that you are certain are true and widely known. If you're not sure, skip the fact and talk about the music instead. Never invent dates, chart positions, awards, or quotes.
@@ -139,9 +146,15 @@ How you talk:
         if not self.active():
             return template_break(req, station)
         try:
-            text = await self._ask(self.system_prompt(dj, station), self.user_prompt(req, station))
-            if text:
-                return clean_for_speech(text)
+            system, prompt = self.system_prompt(dj, station), self.user_prompt(req, station)
+            for attempt in (1, 2):
+                text = await self._ask(system, prompt)
+                if not text:
+                    break
+                text = clean_for_speech(text)
+                if not META_TEXT.search(text):
+                    return text
+                log.warning("Break had drafting notes in it (attempt %d), discarding: %s", attempt, text)
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
             self.disabled_until = time.time() + AUTH_RETRY_SECONDS
             log.warning(
