@@ -47,6 +47,12 @@ radio-kokoro               local TTS (OpenAI-compatible API)
 - **Break lengths:** `talk.lengths` gives each station short/medium/long
   breaks with weights; `extras` caps how many optional bits (fun fact, stats,
   ...) a break that long gets.
+- **Only talks to an audience:** before each break, radio-dj checks Icecast's
+  status page (`ICECAST_STATUS_URL`, default
+  `http://radio-icecast:8000/status-json.xsl`). With nobody tuned in, or
+  Icecast unreachable, the break is skipped: no Claude call, no TTS. Music keeps
+  playing, so a new listener hears a song or two before the DJ's next break.
+  Set `ICECAST_STATUS_URL=` (empty) to always talk.
 - **Pronunciations:** `pronunciations:` in `stations.yaml` fixes names the
   voices get wrong: Kokoro phonemes (`Sade: /ʃɑdˈA/`), a sound-alike spelling
   for any voice, or both. Find phonemes with the booth's "How does Kokoro say

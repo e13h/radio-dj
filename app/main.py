@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from pydantic import BaseModel, Field
 
 from config import load_config
+from listeners import Listeners
 from station import Station
 from store import Store
 from subsonic import Subsonic
@@ -39,6 +40,8 @@ NEXT_TIMEOUT = 240.0  # stays below Liquidsoap's 300s http timeout
 MEDIA_MAX_AGE = 3 * 3600
 # Debug mode: only play the first N seconds of each song (unset = full songs).
 PREVIEW_SECONDS = float(os.environ.get("RADIO_PREVIEW_SECONDS") or 0) or None
+# DJ breaks are only written while a station has listeners here. Set empty to always talk.
+ICECAST_STATUS_URL = os.environ.get("ICECAST_STATUS_URL", "http://radio-icecast:8000/status-json.xsl")
 
 cfg = load_config(CONFIG_PATH)
 stations: dict[str, Station] = {}
@@ -70,10 +73,11 @@ async def lifespan(app: FastAPI):
     store = Store(DATA_DIR / "radio.db")
     writer = Writer(cfg.llm)
     tts = build_providers(cfg.tts.providers)
+    listeners = Listeners(ICECAST_STATUS_URL) if ICECAST_STATUS_URL else None
 
     for sid in cfg.stations:
         stations[sid] = Station(
-            sid, cfg, radio, library_client, store, writer, tts, MEDIA_DIR / sid, PREVIEW_SECONDS
+            sid, cfg, radio, library_client, store, writer, tts, MEDIA_DIR / sid, PREVIEW_SECONDS, listeners
         )
         stations[sid].start()
     if PREVIEW_SECONDS:

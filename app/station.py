@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import selection
 from config import DJConfig, RadioConfig, StationConfig
+from listeners import Listeners
 from pronounce import Pronouncer
 from store import Store
 from subsonic import Subsonic
@@ -84,6 +85,7 @@ class Station:
         tts: dict[str, TTSProvider],
         media_dir: Path,
         preview_seconds: float | None = None,
+        listeners: Listeners | None = None,
     ):
         self.sid = sid
         self.cfg = cfg
@@ -101,6 +103,9 @@ class Station:
         self.pronouncer = Pronouncer(cfg.pronunciations)
         # Debug: play only the first N seconds of each song.
         self.preview_seconds = preview_seconds
+        # None: always talk. Otherwise breaks are only written while someone is tuned in.
+        self.listeners = listeners
+        self.audience = True  # last answer, to log only when it changes
 
         self.track_dir = media_dir / "tracks"
         self.voice_dir = media_dir / "voice"
@@ -234,7 +239,7 @@ class Station:
                     await self.refresh_library()
                 song, phase = self._next_song()
                 song_item = await self._prepare_song(song)
-                if self._should_talk(prev, phase, first):
+                if self._should_talk(prev, phase, first) and await self._anyone_listening(prev):
                     voice = await self._prepare_break(prev, song, "sign_on" if first else phase)
                     if voice:
                         self.upcoming.append(voice)
@@ -307,6 +312,19 @@ class Station:
             return True  # shift change
         n = self.st.talk.every_n_tracks
         return n > 0 and self.tracks_since_talk >= n
+
+    async def _anyone_listening(self, prev: dict | None) -> bool:
+        """Skip breaks (no Claude, no TTS) while nobody is tuned in, or Icecast can't say."""
+        if self.listeners is None:
+            return True
+        audience = await self.listeners.count(self.sid) > 0
+        if audience != self.audience:
+            log.info("[%s] %s", self.sid, "listeners tuned in: DJ breaks on" if audience else "no listeners: DJ breaks off")
+            self.audience = audience
+        if not audience:
+            # Whoever tunes in later hears the DJ on shift then, without a stale handoff.
+            self.on_air_dj = self.st.dj_at(self._eta(prev))
+        return audience
 
     def _eta(self, prev: dict | None) -> dt.datetime:
         """When the next break would air: after what's playing and everything lined up behind it.
