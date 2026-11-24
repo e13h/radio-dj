@@ -8,6 +8,7 @@ import logging
 import random
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -26,6 +27,7 @@ log = logging.getLogger(__name__)
 BIO_CHARS = 1500
 WORDS_PER_SECOND = 2.6
 TTS_ATTEMPTS = 3
+RETRY_SECONDS = 15  # after a failure preparing the next item
 
 
 def _annotate_value(v: object) -> str:
@@ -117,8 +119,14 @@ class Station:
         self.library_loaded_at = 0.0
         self.bios: dict[str, str] = {}
 
-        self.ready: asyncio.Queue[Item] = asyncio.Queue(maxsize=1)
-        # Items queued or handed to Liquidsoap but not yet on air, in play order.
+        # Prepared but not yet handed to Liquidsoap: a break's song waits here
+        # while the break plays. Nothing is prepared further ahead than that, so
+        # breaks are written about one song before they air.
+        self.pending: deque[Item] = deque()
+        self._preparing: asyncio.Task | None = None
+        self._prev: dict | None = None  # the last song prepared
+        self._first = True
+        # Items prepared or handed to Liquidsoap but not yet on air, in play order.
         self.upcoming: list[Item] = []
         self.queued_song_ids: set[str] = set()
         self.now_playing: Item | None = None
@@ -135,14 +143,13 @@ class Station:
     # ---- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
-        self._tasks = [
-            asyncio.create_task(self._produce(), name=f"{self.sid}-producer"),
-            asyncio.create_task(self._refresh_loop(), name=f"{self.sid}-refresh"),
-        ]
+        self._tasks = [asyncio.create_task(self._refresh_loop(), name=f"{self.sid}-refresh")]
+        self._preparation()  # have the first item ready when Liquidsoap first asks
 
     async def stop(self) -> None:
-        for t in self._tasks:
-            t.cancel()
+        for t in [*self._tasks, self._preparing]:
+            if t:
+                t.cancel()
 
     async def _resolve_folder(self) -> str:
         folders = await self.library_client.music_folders()
@@ -173,11 +180,35 @@ class Station:
     # ---- liquidsoap-facing -----------------------------------------------
 
     async def next_item(self, timeout: float) -> Item | None:
-        try:
-            item = await asyncio.wait_for(self.ready.get(), timeout)
-        except TimeoutError:
-            return None
-        return item
+        """The next item to play, prepared now if need be.
+
+        Liquidsoap asks as each item starts, so there's a whole item's length to
+        download the song and write and voice the break before it.
+        """
+        deadline = time.monotonic() + timeout
+        while not self.pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                # shield: if Liquidsoap gives up on this request, keep preparing for its retry.
+                await asyncio.wait_for(asyncio.shield(self._preparation()), remaining)
+            except TimeoutError:
+                return None
+            except Exception:  # logged by _preparation
+                await asyncio.sleep(min(RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
+        return self.pending.popleft()
+
+    def _preparation(self) -> asyncio.Task:
+        """The running preparation, or a new one. Only one runs at a time."""
+        if self._preparing is None or self._preparing.done():
+            self._preparing = asyncio.create_task(self._prepare_next(), name=f"{self.sid}-prepare")
+            self._preparing.add_done_callback(self._log_failure)
+        return self._preparing
+
+    def _log_failure(self, task: asyncio.Task) -> None:
+        if not task.cancelled() and (e := task.exception()):
+            log.error("[%s] preparing the next item failed; retrying shortly", self.sid, exc_info=e)
 
     async def aired(self, item_id: str) -> None:
         idx = next((i for i, it in enumerate(self.upcoming) if it.id == item_id), None)
@@ -230,30 +261,23 @@ class Station:
 
     # ---- programming -----------------------------------------------------
 
-    async def _produce(self) -> None:
-        prev: dict | None = None
-        first = True
-        while True:
-            try:
-                if not self.songs:
-                    await self.refresh_library()
-                song, phase = self._next_song()
-                song_item = await self._prepare_song(song)
-                if self._should_talk(prev, phase, first) and await self._anyone_listening(prev):
-                    voice = await self._prepare_break(prev, song, "sign_on" if first else phase)
-                    if voice:
-                        self.upcoming.append(voice)
-                        await self.ready.put(voice)
-                        self.tracks_since_talk = 0
-                self.upcoming.append(song_item)
-                await self.ready.put(song_item)
-                self.tracks_since_talk += 1
-                prev, first = song, False
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("[%s] producer error; retrying shortly", self.sid)
-                await asyncio.sleep(15)
+    async def _prepare_next(self) -> None:
+        """Prepare the next song, and the break before it if it's time to talk."""
+        if not self.songs:
+            await self.refresh_library()
+        prev, first = self._prev, self._first
+        song, phase = self._next_song()
+        song_item = await self._prepare_song(song)
+        items = [song_item]
+        if self._should_talk(prev, phase, first) and await self._anyone_listening(prev):
+            voice = await self._prepare_break(prev, song, "sign_on" if first else phase)
+            if voice:
+                items.insert(0, voice)
+                self.tracks_since_talk = 0
+        self.upcoming += items
+        self.pending += items
+        self.tracks_since_talk += 1
+        self._prev, self._first = song, False
 
     def _next_song(self) -> tuple[dict, str]:
         """Pick the next song. The phase describes the break that precedes it."""

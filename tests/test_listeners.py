@@ -55,3 +55,31 @@ def test_breaks_follow_listeners():
 def test_unreachable_icecast_means_no_breaks():
     assert anyone(fake_station(FakeListeners(None))) is False
     assert anyone(fake_station(None)) is True  # listener checks turned off
+
+
+def test_items_are_prepared_when_liquidsoap_asks(monkeypatch):
+    """A break and its song are prepared together, one at a time, only once the last is taken."""
+    import station as station_mod
+
+    st = object.__new__(Station)
+    st.sid, st.pending, st._preparing, st.calls = "main", station_mod.deque(), None, 0
+
+    async def prepare_next():
+        st.calls += 1
+        if st.calls == 2:
+            raise RuntimeError("navidrome hiccup")
+        await asyncio.sleep(0.01)
+        st.pending += [f"break{st.calls}", f"song{st.calls}"]
+
+    st._prepare_next = prepare_next
+    monkeypatch.setattr(station_mod, "RETRY_SECONDS", 0.01)
+
+    async def run():
+        # Two requests at once (Liquidsoap retrying) share one preparation.
+        a, b = await asyncio.gather(st.next_item(5), st.next_item(5))
+        assert (a, b) == ("break1", "song1") and st.calls == 1
+        # Nothing is prepared ahead: the next request prepares, after one failed attempt.
+        assert await st.next_item(5) == "break3"
+        assert st.calls == 3 and list(st.pending) == ["song3"]
+
+    asyncio.run(run())
